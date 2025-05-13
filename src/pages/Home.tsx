@@ -120,7 +120,33 @@ const Home = () => {
                 borderRadius: '4px'
               }}
             >
-              Play Now
+              Single Player
+            </Button>
+            <Button
+              component={Link}
+              to="/multiplayer"
+              variant="contained"
+              size="large"
+              sx={{
+                mt: 2,
+                ml: 2,
+                px: 8,
+                py: 2.5,
+                fontSize: '1.4rem',
+                backgroundColor: 'transparent',
+                border: '2px solid #ff0',
+                color: '#ff0',
+                '&:hover': {
+                  backgroundColor: 'rgba(255, 255, 0, 0.1)',
+                  animation: `${buttonGlow} 1s ease-in-out infinite alternate`,
+                },
+                animation: `${buttonGlow} 2s ease-in-out infinite alternate`,
+                textTransform: 'uppercase',
+                letterSpacing: '3px',
+                borderRadius: '4px'
+              }}
+            >
+              Multiplayer
             </Button>
           </Box>
         </Box>
