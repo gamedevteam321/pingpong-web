@@ -4,10 +4,10 @@ import { keyframes } from '@mui/system';
 
 const neonPulse = keyframes`
   0% {
-    text-shadow: 0 0 10px #fff, 0 0 10px #fff, 0 0 30px rgb(0, 42, 255), 0 0 40px rgb(0, 17, 255);
+    text-shadow: 0 0 10px #fff, 0 0 20px #fff, 0 0 30px rgb(255, 255, 255), 0 0 40px rgb(0, 17, 255);
   }
   100% {
-    text-shadow: 0 0 5px #fff, 0 0 5px #fff, 0 0 15px rgb(34, 0, 255), 0 0 20px rgb(0, 34, 255);
+    text-shadow: 0 0 5px #fff, 0 0 10px #fff, 0 0 20px rgb(34, 0, 255), 0 0 30px rgb(0, 34, 255);
   }
 `;
 
@@ -24,79 +24,105 @@ const Home = () => {
   return (
     <Box 
       sx={{ 
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
         minHeight: '100vh',
+        width: '100%',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
         background: 'linear-gradient(to bottom, #000000, #1a1a1a)',
-        padding: 2
+        m: 0,
+        p: 0,
+        boxSizing: 'border-box',
+        overflow: 'hidden'
       }}
     >
       <Paper 
+        elevation={0}
         sx={{ 
-          p: 6,
-          maxWidth: 600,
           width: '100%',
-          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+          height: '100%',
+          backgroundColor: 'transparent',
           backdropFilter: 'blur(10px)',
-          border: '1px solid rgba(0, 55, 255, 0.1)',
-          borderRadius: 4,
-          boxShadow: '0 0 20px rgba(0, 34, 255, 0.2)'
+          border: 'none',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          m: 0,
+          p: 0
         }}
       >
-        <Typography 
-          variant="h3" 
-          component="h1" 
-          gutterBottom
+        <Box
           sx={{
-            color: '#ffffff',
-            textAlign: 'center',
-            fontWeight: 'bold',
-            animation: `${neonPulse} 2s ease-in-out infinite alternate`,
-            mb: 4
+            maxWidth: '800px',
+            width: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            px: 2
           }}
         >
-          3D PING PONG
-        </Typography>
-        
-        <Typography 
-          variant="h6" 
-          paragraph
-          sx={{
-            color: '#0ff',
-            textAlign: 'center',
-            mb: 4,
-            textShadow: '0 0 5px rgba(0, 255, 255, 0.5)'
-          }}
-        >
-          Use the Left and Right arrow keys to move your paddle and try to beat the computer!
-        </Typography>
-
-        <Box sx={{ textAlign: 'center' }}>
-          <Button
-            component={Link}
-            to="/game"
-            variant="contained"
-            size="large"
+          <Typography 
+            variant="h2" 
+            component="h1" 
+            gutterBottom
             sx={{
-              mt: 2,
-              px: 6,
-              py: 2,
-              fontSize: '1.2rem',
-              backgroundColor: 'transparent',
-              border: '2px solid #0ff',
-              color: '#0ff',
-              '&:hover': {
-                backgroundColor: 'rgba(0, 255, 255, 0.1)',
-                animation: `${buttonGlow} 1s ease-in-out infinite alternate`,
-              },
-              animation: `${buttonGlow} 2s ease-in-out infinite alternate`,
-              textTransform: 'uppercase',
-              letterSpacing: '2px'
+              color: '#ffffff',
+              textAlign: 'center',
+              fontWeight: 'bold',
+              mb: 6,
+              letterSpacing: '4px'
             }}
           >
-            Play Now
-          </Button>
+            3D PING PONG
+          </Typography>
+          
+          <Typography 
+            variant="h5" 
+            paragraph
+            sx={{
+              color: '#0ff',
+              textAlign: 'center',
+              mb: 6,
+              textShadow: '0 0 5px rgba(0, 255, 255, 0.5)',
+              letterSpacing: '1px'
+            }}
+          >
+            Use the Left and Right arrow keys to move your paddle and try to beat the computer!
+          </Typography>
+
+          <Box sx={{ textAlign: 'center' }}>
+            <Button
+              component={Link}
+              to="/game"
+              variant="contained"
+              size="large"
+              sx={{
+                mt: 2,
+                px: 8,
+                py: 2.5,
+                fontSize: '1.4rem',
+                backgroundColor: 'transparent',
+                border: '2px solid #0ff',
+                color: '#0ff',
+                '&:hover': {
+                  backgroundColor: 'rgba(0, 255, 255, 0.1)',
+                  animation: `${buttonGlow} 1s ease-in-out infinite alternate`,
+                },
+                animation: `${buttonGlow} 2s ease-in-out infinite alternate`,
+                textTransform: 'uppercase',
+                letterSpacing: '3px',
+                borderRadius: '4px'
+              }}
+            >
+              Play Now
+            </Button>
+          </Box>
         </Box>
       </Paper>
     </Box>
