@@ -6,11 +6,11 @@ import { useThree } from '@react-three/fiber';
 
 const PADDLE_SPEED = 0.5;
 const BALL_SPEED = 0.6;
-const PADDLE_ACCELERATION = 0.45;
+const PADDLE_ACCELERATION = 0.55;
 const PADDLE_DECELERATION = 0.1;
 const MOVEMENT_THRESHOLD = 0.1;
 const COURT_WIDTH = 10;
-const COURT_LENGTH = 15;
+const COURT_LENGTH = 20;
 const WALL_HEIGHT = 1;
 const PADDLE_SIZE = { width: 2, height: 0.3, depth: 0.3 };
 const BALL_RADIUS = 0.22;
@@ -19,12 +19,12 @@ const MAX_DELTA = 1/144;
 const WINNING_SCORE = 11;
 const FPS_UPDATE_INTERVAL = 250;
 const AI_REACTION_TIME = 0.12;
-const AI_BASE_SPEED = PADDLE_SPEED * 0.6;
-const AI_PREDICTION_ERROR = 0.7;
-const AI_DIFFICULTY_SCALE = 0.7;
+const AI_BASE_SPEED = PADDLE_SPEED * 0.8;
+const AI_PREDICTION_ERROR = 0.5;
+const AI_DIFFICULTY_SCALE = 0.8;
 const COLLISION_BUFFER = 0.05;
 const WALL_BOUNCE_DAMPENING = 0.98;
-const PADDLE_BOUNCE_BOOST = 1.02;
+const PADDLE_BOUNCE_BOOST = 1.04;
 const MAX_BALL_SPEED = 0.9;
 
 interface GameSceneProps {
@@ -87,7 +87,7 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
     setScore({ player1: 0, player2: 0 });
     setGameStatus('playing');
     setWinner(null);
-    setCooldown(3);
+    setCooldown(1.5);
     setLastScorer(null);
     ballSpeedRef.current = BALL_SPEED;
     resetBall();
@@ -301,7 +301,7 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
 
   // Initialize game with cooldown
   useEffect(() => {
-    setCooldown(3);
+    setCooldown(1.5);
     const initialDirection = new Vector3(
       (Math.random() - 0.5) * 0.2,
       0,
@@ -452,7 +452,7 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
           anchorY="middle"
           rotation={[0, Math.PI, 0]}
         >
-          {Math.ceil(cooldown)}
+          {cooldown > 1.0 ? "3" : cooldown > 0.5 ? "2" : "1"}
         </Text>
       )}
 
