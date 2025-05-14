@@ -4,8 +4,8 @@ import { Mesh, Vector3, Clock, MathUtils } from 'three';
 import { Text } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 
-const PADDLE_SPEED = 0.5;
-const BALL_SPEED = 0.6;
+const PADDLE_SPEED = 0.3;
+const BALL_SPEED = 0.5;
 const PADDLE_ACCELERATION = 0.55;
 const PADDLE_DECELERATION = 0.1;
 const MOVEMENT_THRESHOLD = 0.1;
@@ -25,7 +25,7 @@ const AI_DIFFICULTY_SCALE = 0.8;
 const COLLISION_BUFFER = 0.05;
 const WALL_BOUNCE_DAMPENING = 0.98;
 const PADDLE_BOUNCE_BOOST = 1.04;
-const MAX_BALL_SPEED = 0.9;
+const MAX_BALL_SPEED = 0.7;
 
 interface GameSceneProps {
   onFpsUpdate: (fps: number) => void;

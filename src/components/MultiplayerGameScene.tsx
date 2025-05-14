@@ -5,17 +5,21 @@ import { Text } from '@react-three/drei';
 import { Socket } from 'socket.io-client';
 
 // Game constants
-const PADDLE_SPEED = 0.5;
-const BALL_SPEED = 0.6;
+const PADDLE_SPEED = 0.3;
+const BALL_SPEED = 0.2;
 const PADDLE_SIZE = { width: 2, height: 0.3, depth: 0.3 };
 const BALL_RADIUS = 0.22;
 const COURT_WIDTH = 10;
 const COURT_LENGTH = 20;
 const WALL_HEIGHT = 1;
-const COLLISION_BUFFER = 0.05;
+const COLLISION_BUFFER = 0.25;
 const WALL_BOUNCE_DAMPENING = 0.98;
-const PADDLE_BOUNCE_BOOST = 1.04;
-const MAX_BALL_SPEED = 0.9;
+const PADDLE_BOUNCE_BOOST = 1.01;
+const MAX_BALL_SPEED = 0.3;
+const SYNC_RATE = 16;
+const COLLISION_CHECK_STEPS = 5;
+const SCORE_COOLDOWN = 3000; // 3 seconds cooldown after scoring
+const COUNTDOWN_STEPS = [3, 2, 1];
 
 interface MultiplayerGameSceneProps {
   socket: Socket;
@@ -29,7 +33,8 @@ interface GameState {
     x: number;
     y: number;
     z: number;
-    direction: { x: number; y: number; z: number };
+    direction: number[];
+    speed?: number;
   };
   paddles: {
     [playerId: string]: {
@@ -58,6 +63,14 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
   const [gameStatus, setGameStatus] = useState<'waiting' | 'playing' | 'finished'>('waiting');
   const ballSpeedRef = useRef(BALL_SPEED);
   const [opponentPosition, setOpponentPosition] = useState({ x: 0, y: PADDLE_SIZE.height/2, z: COURT_LENGTH/2 - 1 });
+  const lastSyncTime = useRef(0);
+  const lastCollisionTime = useRef(0);
+  const COLLISION_COOLDOWN = 100;
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [scoreCooldown, setScoreCooldown] = useState(false);
+  const [lastScorer, setLastScorer] = useState<'player1' | 'player2' | null>(null);
+  const cooldownTimer = useRef<NodeJS.Timeout | null>(null);
+  const countdownTimers = useRef<NodeJS.Timeout[]>([]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -86,8 +99,8 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
         ballRef.current.position.set(0, BALL_RADIUS, 0);
       }
 
-      const localPlayerZ = isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1;
-      const opponentZ = isHost ? COURT_LENGTH/2 - 1 : -COURT_LENGTH/2 + 1;
+      const localPlayerZ = isHost ? COURT_LENGTH/2 - 1 : -COURT_LENGTH/2 + 1;
+      const opponentZ = isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1;
 
       if (player1Ref.current) {
         // Local player's paddle
@@ -158,7 +171,15 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
     socket.on('ballSync', (ballState: GameState['ball']) => {
       if (!isHost && ballRef.current) {
         ballRef.current.position.set(ballState.x, ballState.y, ballState.z);
-        setBallDirection(new Vector3(ballState.direction.x, ballState.direction.y, ballState.direction.z));
+        const newDirection = new Vector3(
+          ballState.direction[0],
+          ballState.direction[1],
+          ballState.direction[2]
+        );
+        setBallDirection(newDirection);
+        if (ballState.speed) {
+          ballSpeedRef.current = ballState.speed;
+        }
       }
     });
 
@@ -180,18 +201,6 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
     };
   }, [socket, isHost, roomId]);
 
-  const calculateBounceDirection = (hitPosition: number, currentDirection: Vector3, isPlayer1: boolean) => {
-    const maxBounceAngle = 0.6;
-    const bounceAngle = hitPosition * maxBounceAngle;
-    const variation = (Math.random() - 0.5) * 0.1;
-    
-    return new Vector3(
-      Math.sin(bounceAngle + variation),
-      0,
-      isPlayer1 ? 1 : -1
-    ).normalize();
-  };
-
   const checkWallCollision = (nextPosition: Vector3, currentDirection: Vector3) => {
     const leftWall = -COURT_WIDTH / 2 + BALL_RADIUS + COLLISION_BUFFER;
     const rightWall = COURT_WIDTH / 2 - BALL_RADIUS - COLLISION_BUFFER;
@@ -208,36 +217,157 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
   };
 
   const checkPaddleCollision = (
-    paddlePosition: { x: number; y: number; z: number },
+    paddlePosition: { x: number; y: number; z: number; velocity?: number },
     isPlayer1: boolean,
     nextPosition: Vector3,
     currentDirection: Vector3
   ) => {
+    const now = performance.now();
+    if (now - lastCollisionTime.current < COLLISION_COOLDOWN) {
+      return null;
+    }
+
     const paddleZ = paddlePosition.z;
     const paddleX = paddlePosition.x;
     const paddleHalfWidth = PADDLE_SIZE.width/2;
     const paddleHalfDepth = PADDLE_SIZE.depth/2;
-    
-    const movingTowardsPaddle = (isPlayer1 && currentDirection.z < 0) || (!isPlayer1 && currentDirection.z > 0);
-    
-    if (
-      Math.abs(nextPosition.z - paddleZ) < (paddleHalfDepth + BALL_RADIUS + COLLISION_BUFFER) &&
-      Math.abs(nextPosition.x - paddleX) < (paddleHalfWidth + BALL_RADIUS) &&
-      movingTowardsPaddle
-    ) {
-      const hitPosition = MathUtils.clamp((nextPosition.x - paddleX) / paddleHalfWidth, -1, 1);
-      const newDirection = calculateBounceDirection(hitPosition, currentDirection, isPlayer1);
+
+    // More precise collision bounds with increased buffer for host
+    const collisionBuffer = isHost ? COLLISION_BUFFER * 1.2 : COLLISION_BUFFER;
+    const withinX = Math.abs(nextPosition.x - paddleX) <= (paddleHalfWidth + BALL_RADIUS + collisionBuffer);
+    const withinZ = Math.abs(nextPosition.z - paddleZ) <= (paddleHalfDepth + BALL_RADIUS + collisionBuffer);
+
+    // Enhanced approach detection for host
+    const ballVelocityZ = currentDirection.z * ballSpeedRef.current;
+    const isApproaching = isPlayer1 ?
+      (ballVelocityZ < 0 && nextPosition.z > paddleZ - paddleHalfDepth) :
+      (ballVelocityZ > 0 && nextPosition.z < paddleZ + paddleHalfDepth);
+
+    if (withinX && withinZ && isApproaching) {
+      lastCollisionTime.current = now;
+
+      // Calculate hit position with improved precision and paddle velocity influence
+      const relativeX = nextPosition.x - paddleX;
+      const normalizedHitPos = relativeX / (paddleHalfWidth + BALL_RADIUS);
+      const hitPosition = MathUtils.clamp(normalizedHitPos, -0.95, 0.95);
+
+      // Add paddle velocity influence to bounce angle
+      const paddleVelocityInfluence = (paddlePosition.velocity || 0) * 0.3;
+      const maxBounceAngle = 0.75;
+      const bounceAngle = hitPosition * maxBounceAngle + paddleVelocityInfluence;
       
-      nextPosition.z = paddleZ + (isPlayer1 ? 1 : -1) * (paddleHalfDepth + BALL_RADIUS + COLLISION_BUFFER * 2);
-      ballSpeedRef.current = Math.min(ballSpeedRef.current * PADDLE_BOUNCE_BOOST, MAX_BALL_SPEED);
+      // Determine bounce direction
+      const zDirection = isPlayer1 ? 1 : -1;
       
+      const newDirection = new Vector3(
+        Math.sin(bounceAngle),
+        0,
+        Math.sign(zDirection) * Math.cos(bounceAngle)
+      ).normalize();
+
+      // Push ball away from paddle with increased margin for host
+      const pushDistance = paddleHalfDepth + BALL_RADIUS + collisionBuffer * 3;
+      nextPosition.z = paddleZ + (zDirection * pushDistance);
+
+      // Gradual speed increase with paddle velocity boost
+      const velocityBoost = Math.abs(paddlePosition.velocity || 0) * 0.01;
+      ballSpeedRef.current = Math.min(
+        ballSpeedRef.current * (PADDLE_BOUNCE_BOOST + velocityBoost),
+        MAX_BALL_SPEED
+      );
+
       return newDirection;
     }
     return null;
   };
 
+  // Function to reset paddles to center
+  const resetPaddles = () => {
+    if (player1Ref.current) {
+      player1Ref.current.position.x = 0;
+    }
+    // Emit our paddle position
+    socket.emit('paddleMove', {
+      roomId,
+      position: {
+        x: 0,
+        y: PADDLE_SIZE.height/2,
+        z: isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1
+      }
+    });
+  };
+
+  // Function to start countdown
+  const startCountdown = () => {
+    // Clear any existing timers
+    countdownTimers.current.forEach(timer => clearTimeout(timer));
+    countdownTimers.current = [];
+    
+    // Set initial countdown
+    setCountdown(3);
+    
+    // Create timers for 3,2,1
+    COUNTDOWN_STEPS.forEach((step, index) => {
+      const timer = setTimeout(() => {
+        setCountdown(step);
+      }, index * 1000);
+      countdownTimers.current.push(timer);
+    });
+
+    // Final timer to clear countdown and resume game
+    const finalTimer = setTimeout(() => {
+      setCountdown(null);
+      setScoreCooldown(false);
+      
+      // Set ball direction towards the scorer
+      if (isHost) {
+        const direction = new Vector3(
+          (Math.random() - 0.5) * 0.2,
+          0,
+          lastScorer === 'player1' ? -1 : 1
+        ).normalize();
+        setBallDirection(direction);
+        
+        socket.emit('ballUpdate', {
+          roomId,
+          ballState: {
+            x: 0,
+            y: BALL_RADIUS,
+            z: 0,
+            direction: direction.toArray(),
+            speed: BALL_SPEED
+          }
+        });
+      }
+    }, SCORE_COOLDOWN);
+    countdownTimers.current.push(finalTimer);
+  };
+
+  // Function to handle scoring
+  const handleScoring = (scorer: 'player1' | 'player2') => {
+    const newScore = { 
+      ...score, 
+      [scorer]: score[scorer] + 1 
+    };
+    setScore(newScore);
+    setLastScorer(scorer);
+    socket.emit('scoreUpdate', { roomId, score: newScore });
+    
+    // Reset ball and paddles
+    if (ballRef.current) {
+      ballRef.current.position.set(0, BALL_RADIUS, 0);
+      ballSpeedRef.current = BALL_SPEED;
+    }
+    resetPaddles();
+
+    // Start cooldown and countdown
+    setScoreCooldown(true);
+    startCountdown();
+  };
+
   useFrame(() => {
     if (!ballRef.current || !player1Ref.current || gameStatus !== 'playing') return;
+    if (scoreCooldown) return; // Don't update ball position during cooldown
 
     const now = performance.now();
     const currentTime = now * 0.001;
@@ -251,13 +381,19 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       lastFpsUpdate.current = now;
     }
 
-    const delta = Math.min(currentTime - lastFrameTime.current, 1/144);
+    const delta = Math.min(currentTime - lastFrameTime.current, 1/60);
     lastFrameTime.current = currentTime;
 
-    // Handle player paddle movement
+    // Handle player paddle movement with rotation-aware controls
     let targetX = player1Ref.current.position.x;
-    if (keysPressed.current['ArrowLeft']) targetX -= PADDLE_SPEED * delta * 60;
-    if (keysPressed.current['ArrowRight']) targetX += PADDLE_SPEED * delta * 60;
+    const moveAmount = PADDLE_SPEED * delta * 60;
+    
+    if (keysPressed.current['ArrowLeft']) {
+      targetX += (isHost ? -moveAmount : moveAmount);
+    }
+    if (keysPressed.current['ArrowRight']) {
+      targetX += (isHost ? moveAmount : -moveAmount);
+    }
 
     targetX = MathUtils.clamp(
       targetX,
@@ -265,90 +401,128 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       COURT_WIDTH / 2 - PADDLE_SIZE.width/2
     );
 
+    // Calculate paddle velocity for improved collision detection
+    const paddleVelocity = (targetX - player1Ref.current.position.x) / delta;
     player1Ref.current.position.x = targetX;
 
-    // Emit paddle position
+    // Emit paddle position immediately after movement
     socket.emit('paddleMove', {
       roomId,
       position: {
         x: targetX,
         y: PADDLE_SIZE.height/2,
-        z: isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1
+        z: isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1,
+        velocity: paddleVelocity
       }
     });
 
     // Host handles ball physics
     if (isHost && ballRef.current) {
-      const nextPosition = new Vector3().copy(ballRef.current.position).add(
-        new Vector3(
-          ballDirection.x * ballSpeedRef.current * delta * 60,
+      const steps = COLLISION_CHECK_STEPS;
+      const stepDelta = delta / steps;
+      
+      for (let i = 0; i < steps; i++) {
+        const moveAmount = new Vector3(
+          ballDirection.x * ballSpeedRef.current * stepDelta * 60,
           0,
-          ballDirection.z * ballSpeedRef.current * delta * 60
-        )
-      );
+          ballDirection.z * ballSpeedRef.current * stepDelta * 60
+        );
 
-      const wallCollision = checkWallCollision(nextPosition, ballDirection);
-      if (wallCollision) {
-        setBallDirection(wallCollision);
-        ballSpeedRef.current *= WALL_BOUNCE_DAMPENING;
-        return;
-      }
-
-      // Check collisions with both paddles
-      const localPlayerCollision = checkPaddleCollision(
-        { x: player1Ref.current.position.x, y: PADDLE_SIZE.height/2, z: -COURT_LENGTH/2 + 1 },
-        true,
-        nextPosition,
-        ballDirection
-      );
-      if (localPlayerCollision) {
-        setBallDirection(localPlayerCollision);
-        return;
-      }
-
-      const opponentCollision = checkPaddleCollision(
-        { x: opponentPosition.x, y: PADDLE_SIZE.height/2, z: COURT_LENGTH/2 - 1 },
-        false,
-        nextPosition,
-        ballDirection
-      );
-      if (opponentCollision) {
-        setBallDirection(opponentCollision);
-        return;
-      }
-
-      ballRef.current.position.copy(nextPosition);
-
-      // Emit ball position
-      socket.emit('ballUpdate', {
-        roomId,
-        ballState: {
-          x: nextPosition.x,
-          y: nextPosition.y,
-          z: nextPosition.z,
-          direction: { x: ballDirection.x, y: ballDirection.y, z: ballDirection.z }
+        // Strict movement limit per step
+        const maxMove = 0.1; // Reduced max movement
+        if (moveAmount.length() > maxMove) {
+          moveAmount.normalize().multiplyScalar(maxMove);
         }
-      });
+
+        const nextPosition = new Vector3().copy(ballRef.current.position).add(moveAmount);
+        let collisionOccurred = false;
+
+        // Wall collisions
+        const wallCollision = checkWallCollision(nextPosition, ballDirection);
+        if (wallCollision) {
+          setBallDirection(wallCollision);
+          ballSpeedRef.current *= WALL_BOUNCE_DAMPENING;
+          collisionOccurred = true;
+        }
+
+        // Player paddle collisions
+        const player1Collision = checkPaddleCollision(
+          {
+            x: player1Ref.current.position.x,
+            y: PADDLE_SIZE.height/2,
+            z: -COURT_LENGTH/2 + 1
+          },
+          true,
+          nextPosition,
+          ballDirection
+        );
+
+        if (player1Collision) {
+          setBallDirection(player1Collision);
+          collisionOccurred = true;
+        }
+
+        const player2Collision = checkPaddleCollision(
+          {
+            x: opponentPosition.x,
+            y: PADDLE_SIZE.height/2,
+            z: COURT_LENGTH/2 - 1
+          },
+          false,
+          nextPosition,
+          ballDirection
+        );
+
+        if (player2Collision) {
+          setBallDirection(player2Collision);
+          collisionOccurred = true;
+        }
+
+        if (collisionOccurred) {
+          // Immediate sync on collision
+          socket.emit('ballUpdate', {
+            roomId,
+            ballState: {
+              x: nextPosition.x,
+              y: nextPosition.y,
+              z: nextPosition.z,
+              direction: ballDirection.toArray(),
+              speed: ballSpeedRef.current
+            }
+          });
+          break;
+        }
+
+        // Update position if no collision
+        ballRef.current.position.copy(nextPosition);
+      }
+
+      // Regular sync
+      if (now - lastSyncTime.current >= SYNC_RATE) {
+        socket.emit('ballUpdate', {
+          roomId,
+          ballState: {
+            x: ballRef.current.position.x,
+            y: ballRef.current.position.y,
+            z: ballRef.current.position.z,
+            direction: ballDirection.toArray(),
+            speed: ballSpeedRef.current
+          }
+        });
+        lastSyncTime.current = now;
+      }
 
       // Check for scoring
-      if (nextPosition.z <= -COURT_LENGTH / 2 - BALL_RADIUS) {
-        const newScore = { ...score, player2: score.player2 + 1 };
-        setScore(newScore);
-        socket.emit('scoreUpdate', { roomId, score: newScore });
-        ballRef.current.position.set(0, BALL_RADIUS, 0);
-        ballSpeedRef.current = BALL_SPEED;
-      } else if (nextPosition.z >= COURT_LENGTH / 2 + BALL_RADIUS) {
-        const newScore = { ...score, player1: score.player1 + 1 };
-        setScore(newScore);
-        socket.emit('scoreUpdate', { roomId, score: newScore });
-        ballRef.current.position.set(0, BALL_RADIUS, 0);
-        ballSpeedRef.current = BALL_SPEED;
+      if (ballRef.current.position.z <= -COURT_LENGTH / 2 - BALL_RADIUS) {
+        handleScoring('player2');
+      } else if (ballRef.current.position.z >= COURT_LENGTH / 2 + BALL_RADIUS) {
+        handleScoring('player1');
       }
     }
   });
 
   return (
-    <group position={[0, 0, 0]} rotation={[0, isHost ? 0 : Math.PI, 0]}>
+    <group position={[0, 0, 0]} rotation={[0, isHost ? Math.PI : 0, 0]}>
       {/* Court */}
       <mesh 
         rotation={[-Math.PI / 2, 0, 0]} 
@@ -392,7 +566,7 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       {/* Player paddle */}
       <mesh
         ref={player1Ref}
-        position={[0, PADDLE_SIZE.height/2, -COURT_LENGTH/2 + 1]}
+        position={[0, PADDLE_SIZE.height/2, isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1]}
         castShadow
         receiveShadow
       >
@@ -403,7 +577,7 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       {/* Opponent paddle */}
       <mesh
         ref={player2Ref}
-        position={[0, PADDLE_SIZE.height/2, COURT_LENGTH/2 - 1]}
+        position={[0, PADDLE_SIZE.height/2, isHost ? COURT_LENGTH/2 - 1 : -COURT_LENGTH/2 + 1]}
         castShadow
         receiveShadow
       >
@@ -421,42 +595,64 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
         <meshStandardMaterial color="#ffffff" />
       </mesh>
 
-      {/* Score display */}
-      <Text
-        position={[0, 3, 0]}
-        fontSize={0.8}
-        color="#ffffff"
-        anchorX="center"
-        anchorY="middle"
-        rotation={[0, 0, 0]}
-      >
-        {`${score.player1} - ${score.player2}`}
-      </Text>
+      {/* Score and text displays */}
+      <group>
+        {/* Center score display */}
+        <group position={[0, 3, 0]}>
+          <Text
+            fontSize={0.8}
+            color="#ffffff"
+            anchorX="center"
+            anchorY="middle"
+            rotation={[0, isHost ? 0 : Math.PI, 0]}
+          >
+            {`${score.player1} - ${score.player2}`}
+          </Text>
+        </group>
 
-      {gameStatus === 'waiting' && (
-        <Text
-          position={[0, 3, 0]}
-          fontSize={1}
-          color="#ffff00"
-          anchorX="center"
-          anchorY="middle"
-          rotation={[0, 0, 0]}
-        >
-          Waiting for opponent...
-        </Text>
-      )}
+        {/* Status messages */}
+        {gameStatus === 'waiting' && (
+          <group position={[0, 3, 0]}>
+            <Text
+              fontSize={1}
+              color="#ffff00"
+              anchorX="center"
+              anchorY="middle"
+              rotation={[0, isHost ? 0 : Math.PI, 0]}
+            >
+              Waiting for opponent...
+            </Text>
+          </group>
+        )}
 
-      {gameStatus === 'finished' && (
-        <Text
-          position={[0, 3, 0]}
-          fontSize={1}
-          color="#ff0000"
-          anchorX="center"
-          anchorY="middle"
-          rotation={[0, 0, 0]}
-        >
-          Opponent disconnected
-        </Text>
+        {gameStatus === 'finished' && (
+          <group position={[0, 3, 0]}>
+            <Text
+              fontSize={1}
+              color="#ff0000"
+              anchorX="center"
+              anchorY="middle"
+              rotation={[0, isHost ? 0 : Math.PI, 0]}
+            >
+              Opponent disconnected
+            </Text>
+          </group>
+        )}
+      </group>
+
+      {/* Countdown display */}
+      {countdown !== null && (
+        <group position={[0, 3, 0]}>
+          <Text
+            fontSize={2}
+            color="#ffff00"
+            anchorX="center"
+            anchorY="middle"
+            rotation={[0, isHost ? 0 : Math.PI, 0]}
+          >
+            {countdown}
+          </Text>
+        </group>
       )}
     </group>
   );

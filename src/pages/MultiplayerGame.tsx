@@ -22,7 +22,7 @@ const MultiplayerGame = () => {
   const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
-    socketRef.current = io('http://192.168.1.17:3001', {
+    socketRef.current = io('http://192.168.1.18:3001', {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionAttempts: 5,
@@ -277,7 +277,7 @@ const MultiplayerGame = () => {
       <Canvas
         shadows
         camera={{ 
-          position: [0, 15, 20],
+          position: [0, 15, isHost ? 20 : -20],
           fov: 45,
           near: 0.1,
           far: 1000

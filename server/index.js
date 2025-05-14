@@ -220,7 +220,7 @@ const HOST = '0.0.0.0';
 try {
   httpServer.listen(PORT, HOST, () => {
     console.log(`Server running on http://${HOST}:${PORT}`);
-    console.log(`For local network access, use: http://192.168.1.17:${PORT}`);
+    console.log(`For local network access, use: http://192.168.1.18:${PORT}`);
     console.log('WebSocket server is ready');
   });
 } catch (error) {
