@@ -7,13 +7,29 @@ interface GameUIProps {
 
 const GameUI = ({ fps }: GameUIProps) => {
   const [showControls, setShowControls] = useState(true);
+  const [isMobile, setIsMobile] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(() => {
       setShowControls(false);
     }, 3000);
 
-    return () => clearTimeout(timer);
+    // Check if device is mobile
+    const checkMobile = () => {
+      setIsMobile(window.matchMedia('(max-width: 768px)').matches);
+    };
+
+    // Initial check
+    checkMobile();
+
+    // Add listener for screen size changes
+    const mediaQuery = window.matchMedia('(max-width: 768px)');
+    mediaQuery.addListener(checkMobile);
+
+    return () => {
+      clearTimeout(timer);
+      mediaQuery.removeListener(checkMobile);
+    };
   }, []);
 
   return (
@@ -63,7 +79,7 @@ const GameUI = ({ fps }: GameUIProps) => {
               lineHeight: 1.2
             }}
           >
-            Use ← and → keys to move
+            {isMobile ? 'Slide left or right to move' : 'Use ← and → keys to move'}
           </Typography>
         </Box>
       </Box>

@@ -1,26 +1,33 @@
 import { useRef, useState, useEffect, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Mesh, Vector3, Clock, MathUtils } from 'three';
+import { Mesh, Vector3, Clock, MathUtils, Box3, Ray } from 'three';
 import { Text } from '@react-three/drei';
 import { Socket } from 'socket.io-client';
 
 // Game constants
 const PADDLE_SPEED = 0.3;
-const BALL_SPEED = 0.2;
+const BALL_SPEED = 0.5;
 const PADDLE_SIZE = { width: 2, height: 0.3, depth: 0.3 };
 const BALL_RADIUS = 0.22;
 const COURT_WIDTH = 10;
 const COURT_LENGTH = 20;
 const WALL_HEIGHT = 1;
-const COLLISION_BUFFER = 0.5;
+const COLLISION_BUFFER = 0.05;
 const WALL_BOUNCE_DAMPENING = 0.98;
-const PADDLE_BOUNCE_BOOST = 1.01;
-const MAX_BALL_SPEED = 0.3;
+const PADDLE_BOUNCE_BOOST = 1.04;
+const MAX_BALL_SPEED = 0.7;
 const SYNC_RATE = 16;
-const COLLISION_CHECK_STEPS = 24;
+const BASE_COLLISION_STEPS = 120;
 const SCORE_COOLDOWN = 3000;
 const COUNTDOWN_STEPS = [3, 2, 1];
-const SAFETY_ZONE = 1.0;
+const SAFETY_ZONE = 0.4;
+const PADDLE_VELOCITY_INFLUENCE = 0.05;
+const INTERPOLATION_SPEED = 0.4;
+const VELOCITY_SMOOTHING = 0.8;
+const MAX_MOVE_PER_FRAME = 0.05;
+const COLLISION_COOLDOWN_FRAMES = 1;
+const POST_COLLISION_FREEZE_FRAMES = 1;
+const PADDLE_SYNC_INTERVAL = 500;
 
 interface MultiplayerGameSceneProps {
   socket: Socket;
@@ -79,6 +86,15 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
   const lastBallPosition = useRef(new Vector3());
   const debugCollisionRef = useRef<Mesh>(null);
   const debugBallRef = useRef<Mesh>(null);
+  const lastCollisionFrame = useRef(0);
+  const postCollisionFreezeCounter = useRef(0);
+  const previousBallStates = useRef<Array<{ position: Vector3, time: number }>>([]);
+  const debugMissedCollisions = useRef(0);
+  const [lastCollisionInfo, setLastCollisionInfo] = useState<{
+    time: number;
+    position: Vector3;
+    type: 'paddle1' | 'paddle2' | 'wall';
+  } | null>(null);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -176,17 +192,16 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
     });
 
     socket.on('ballSync', (ballState: GameState['ball']) => {
-      if (!isHost && ballRef.current) {
-        ballRef.current.position.set(ballState.x, ballState.y, ballState.z);
-        const newDirection = new Vector3(
-          ballState.direction[0],
-          ballState.direction[1],
-          ballState.direction[2]
+      if (!isHost && ballRef.current && ballState.speed) {
+        // Predict ball position ahead by one frame to compensate for network delay
+        const predictedPosition = new Vector3(
+          ballState.x + ballState.direction[0] * ballState.speed * (1 / 60),
+          ballState.y,
+          ballState.z + ballState.direction[2] * ballState.speed * (1 / 60)
         );
-        setBallDirection(newDirection);
-        if (ballState.speed) {
-          ballSpeedRef.current = ballState.speed;
-        }
+        ballRef.current.position.copy(predictedPosition);
+        setBallDirection(new Vector3(...ballState.direction));
+        ballSpeedRef.current = ballState.speed;
       }
     });
 
@@ -208,16 +223,72 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
     };
   }, [socket, isHost, roomId]);
 
+  // Add paddle sync effect
+  useEffect(() => {
+    const syncInterval = setInterval(() => {
+      if (player1Ref.current) {
+        socket.emit('paddleSync', {
+          roomId,
+          position: {
+            x: player1Ref.current.position.x,
+            y: player1Ref.current.position.y,
+            z: player1Ref.current.position.z
+          }
+        });
+      }
+    }, PADDLE_SYNC_INTERVAL);
+    
+    return () => clearInterval(syncInterval);
+  }, [socket, roomId]);
+
+  // Update socket listeners
+  useEffect(() => {
+    socket.on('paddleSync', ({ position }) => {
+      if (position) {
+        interpolatedOpponentPos.current.x = position.x;
+      }
+    });
+
+    socket.on('ballSync', (ballState: GameState['ball']) => {
+      if (!isHost && ballRef.current && ballState.speed) {
+        // Predict ball position ahead by one frame to compensate for network delay
+        const predictedPosition = new Vector3(
+          ballState.x + ballState.direction[0] * ballState.speed * (1 / 60),
+          ballState.y,
+          ballState.z + ballState.direction[2] * ballState.speed * (1 / 60)
+        );
+        ballRef.current.position.copy(predictedPosition);
+        setBallDirection(new Vector3(...ballState.direction));
+        ballSpeedRef.current = ballState.speed;
+      }
+    });
+
+    return () => {
+      socket.off('paddleSync');
+      socket.off('ballSync');
+    };
+  }, [socket, isHost]);
+
   const checkWallCollision = (nextPosition: Vector3, currentDirection: Vector3) => {
     const leftWall = -COURT_WIDTH / 2 + BALL_RADIUS + COLLISION_BUFFER;
     const rightWall = COURT_WIDTH / 2 - BALL_RADIUS - COLLISION_BUFFER;
     
     if (nextPosition.x <= leftWall) {
       nextPosition.x = leftWall + COLLISION_BUFFER;
+      setLastCollisionInfo({
+        time: performance.now(),
+        position: new Vector3(leftWall, nextPosition.y, nextPosition.z),
+        type: 'wall'
+      });
       return new Vector3(-currentDirection.x, 0, currentDirection.z);
     }
     if (nextPosition.x >= rightWall) {
       nextPosition.x = rightWall - COLLISION_BUFFER;
+      setLastCollisionInfo({
+        time: performance.now(),
+        position: new Vector3(rightWall, nextPosition.y, nextPosition.z),
+        type: 'wall'
+      });
       return new Vector3(-currentDirection.x, 0, currentDirection.z);
     }
     return null;
@@ -230,79 +301,99 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
     nextPosition: Vector3,
     currentDirection: Vector3
   ) => {
-    const now = performance.now();
-    if (now - lastCollisionTime.current < COLLISION_COOLDOWN) return null;
+    if (frameCount.current - lastCollisionFrame.current < COLLISION_COOLDOWN_FRAMES) {
+      return null;
+    }
 
     const paddleZ = paddlePosition.z;
     const paddleX = paddlePosition.x;
+    const paddleY = PADDLE_SIZE.height / 2;
 
-    // Expanded collision bounds
-    const minZ = paddleZ - (PADDLE_SIZE.depth/2 + COLLISION_BUFFER + SAFETY_ZONE);
-    const maxZ = paddleZ + (PADDLE_SIZE.depth/2 + COLLISION_BUFFER + SAFETY_ZONE);
-    const minX = paddleX - (PADDLE_SIZE.width/2 + COLLISION_BUFFER);
-    const maxX = paddleX + (PADDLE_SIZE.width/2 + COLLISION_BUFFER);
+    // Create paddle bounding box with precise dimensions
+    const paddleBox = new Box3().setFromCenterAndSize(
+      new Vector3(paddleX, paddleY, paddleZ),
+      new Vector3(
+        PADDLE_SIZE.width + COLLISION_BUFFER,
+        PADDLE_SIZE.height + COLLISION_BUFFER,
+        PADDLE_SIZE.depth + COLLISION_BUFFER
+      )
+    );
 
+    // Calculate ball movement vector
+    const moveVector = nextPosition.clone().sub(lastPosition);
+    const movementDistance = moveVector.length();
+    
+    // Create ray from ball's last position in its movement direction
+    const ray = new Ray(lastPosition, moveVector.normalize());
+    
     // Check if ball is moving towards the paddle
     const movingTowardsPaddle = isPlayer1 ? 
-      (currentDirection.z < 0 && lastPosition.z > paddleZ) :
-      (currentDirection.z > 0 && lastPosition.z < paddleZ);
+      (currentDirection.z < 0 && lastPosition.z > paddleZ - PADDLE_SIZE.depth * 2) :
+      (currentDirection.z > 0 && lastPosition.z < paddleZ + PADDLE_SIZE.depth * 2);
 
     if (!movingTowardsPaddle) return null;
 
-    // Line segment intersection test
-    const t = (paddleZ - lastPosition.z) / (nextPosition.z - lastPosition.z);
-    if (t >= 0 && t <= 1) {
-      const intersectX = lastPosition.x + t * (nextPosition.x - lastPosition.x);
-      const withinPaddleX = intersectX >= minX && intersectX <= maxX;
+    // Perform ray-box intersection test with distance check
+    const intersection = ray.intersectBox(paddleBox, new Vector3());
+    if (intersection && intersection.distanceTo(lastPosition) <= movementDistance) {
+      lastCollisionFrame.current = frameCount.current;
+      postCollisionFreezeCounter.current = POST_COLLISION_FREEZE_FRAMES;
 
-      // Additional safety check for Z-axis
-      const ballInZRange = isPlayer1 ?
-        (lastPosition.z >= minZ && nextPosition.z <= maxZ) :
-        (lastPosition.z <= maxZ && nextPosition.z >= minZ);
+      // Calculate exact hit position on paddle
+      const hitPoint = intersection.clone();
+      const relativeX = (hitPoint.x - paddleX) / (PADDLE_SIZE.width / 2);
+      
+      // Update collision info for debugging
+      setLastCollisionInfo({
+        time: performance.now(),
+        position: hitPoint,
+        type: isPlayer1 ? 'paddle1' : 'paddle2'
+      });
 
-      if (withinPaddleX && ballInZRange) {
-        lastCollisionTime.current = now;
+      // Calculate bounce angle based on hit position and paddle velocity
+      const maxBounceAngle = Math.PI / 3;
+      const baseAngle = relativeX * (maxBounceAngle * 0.8);
+      
+      // Add paddle velocity influence to bounce angle
+      const paddleVelocityInfluence = (paddlePosition.velocity || 0) * PADDLE_VELOCITY_INFLUENCE;
+      const finalBounceAngle = MathUtils.clamp(
+        baseAngle + paddleVelocityInfluence,
+        -maxBounceAngle,
+        maxBounceAngle
+      );
 
-        // Calculate bounce angle based on hit position
-        const relativeX = intersectX - paddleX;
-        const normalizedHitPos = relativeX / (PADDLE_SIZE.width/2);
-        
-        // More controlled bounce angle calculation
-        const maxBounceAngle = Math.PI / 3; // 60 degrees
-        const bounceAngle = normalizedHitPos * (maxBounceAngle * 0.8); // 80% of max angle
-        
-        // Apply paddle velocity influence
-        const paddleVelocityInfluence = (paddlePosition.velocity || 0) * 0.1;
-        const finalBounceAngle = MathUtils.clamp(
-          bounceAngle + paddleVelocityInfluence,
-          -maxBounceAngle,
-          maxBounceAngle
-        );
+      // Calculate new direction vector
+      const zDir = isPlayer1 ? 1 : -1;
+      const newDirection = new Vector3(
+        Math.sin(finalBounceAngle),
+        0,
+        zDir * Math.cos(finalBounceAngle)
+      ).normalize();
 
-        // Calculate new direction
-        const zDir = isPlayer1 ? 1 : -1;
-        const newDirection = new Vector3(
-          Math.sin(finalBounceAngle),
-          0,
-          zDir * Math.cos(finalBounceAngle)
-        ).normalize();
+      // Increase ball speed and apply bounce boost
+      ballSpeedRef.current = Math.min(
+        ballSpeedRef.current * PADDLE_BOUNCE_BOOST,
+        MAX_BALL_SPEED
+      );
 
-        // Adjust ball speed with more controlled boost
-        const speedBoost = 1.03 + Math.abs(paddleVelocityInfluence) * 0.1;
-        ballSpeedRef.current = Math.min(
-          ballSpeedRef.current * speedBoost,
-          MAX_BALL_SPEED
-        );
-
-        // Push ball away from paddle to prevent multiple collisions
-        if (isPlayer1) {
-          nextPosition.z = paddleZ + PADDLE_SIZE.depth/2 + BALL_RADIUS + COLLISION_BUFFER;
-        } else {
-          nextPosition.z = paddleZ - PADDLE_SIZE.depth/2 - BALL_RADIUS - COLLISION_BUFFER;
-        }
-
-        return newDirection;
+      // Push ball away from paddle to prevent sticking
+      const pushDistance = BALL_RADIUS + PADDLE_SIZE.depth/2 + COLLISION_BUFFER;
+      if (isPlayer1) {
+        nextPosition.z = paddleZ + pushDistance;
+      } else {
+        nextPosition.z = paddleZ - pushDistance;
       }
+
+      return newDirection;
+    }
+
+    // Debug visualization
+    if (debugVisible && debugCollisionRef.current) {
+      debugCollisionRef.current.scale.set(
+        PADDLE_SIZE.width + COLLISION_BUFFER,
+        PADDLE_SIZE.height + COLLISION_BUFFER,
+        PADDLE_SIZE.depth + COLLISION_BUFFER
+      );
     }
 
     return null;
@@ -402,26 +493,8 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       lastFpsUpdate.current = now;
     }
 
-    // Interpolate opponent position
-    interpolatedOpponentPos.current.x = MathUtils.lerp(
-      interpolatedOpponentPos.current.x,
-      opponentPosition.x,
-      0.2
-    );
-    interpolatedOpponentPos.current.y = MathUtils.lerp(
-      interpolatedOpponentPos.current.y,
-      opponentPosition.y,
-      0.2
-    );
-
-    // Update opponent paddle position with interpolated values
-    if (player2Ref.current) {
-      player2Ref.current.position.x = interpolatedOpponentPos.current.x;
-      player2Ref.current.position.y = interpolatedOpponentPos.current.y;
-    }
-
-    // Handle player paddle movement
-    const moveDelta = PADDLE_SPEED * delta * 60;
+    // Improved paddle movement and interpolation
+    const moveDelta = PADDLE_SPEED * Math.min(delta * 60, 2); // Cap delta time
     let targetX = player1Ref.current.position.x;
 
     if (keysPressed.current['ArrowLeft']) {
@@ -431,59 +504,79 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
       targetX += isHost ? moveDelta : -moveDelta;
     }
 
+    // Clamp target position
     targetX = MathUtils.clamp(
       targetX,
       -COURT_WIDTH / 2 + PADDLE_SIZE.width/2,
       COURT_WIDTH / 2 - PADDLE_SIZE.width/2
     );
 
-    // Calculate paddle velocity
-    player1Velocity.current = (targetX - previousX.current) / delta;
-    previousX.current = targetX;
+    // Smooth velocity calculation with exponential moving average
+    const rawVelocity = (targetX - previousX.current) / delta;
+    player1Velocity.current = player1Velocity.current * VELOCITY_SMOOTHING + 
+                            rawVelocity * (1 - VELOCITY_SMOOTHING);
+    
+    previousX.current = player1Ref.current.position.x;
     player1Ref.current.position.x = targetX;
 
-    // Update debug visualization positions
-    if (debugVisible) {
-      if (debugCollisionRef.current) {
-        debugCollisionRef.current.position.copy(player1Ref.current.position);
-      }
-      if (debugBallRef.current && ballRef.current) {
+    // Improved opponent interpolation with prediction
+    if (player2Ref.current) {
+      const predictedX = opponentPosition.x + (player2Ref.current.position.x - opponentPosition.x) * INTERPOLATION_SPEED;
+      interpolatedOpponentPos.current.x = MathUtils.lerp(
+        player2Ref.current.position.x,
+        predictedX,
+        INTERPOLATION_SPEED
+      );
+      player2Ref.current.position.x = interpolatedOpponentPos.current.x;
+      
+      // Update debug visualization if enabled
+      if (debugVisible && debugCollisionRef.current && debugBallRef.current && ballRef.current) {
+        debugCollisionRef.current.position.copy(player1Ref.current!.position);
         debugBallRef.current.position.copy(ballRef.current.position);
       }
     }
 
-    // Emit paddle movement
-    socket.emit('paddleMove', {
-      roomId,
-      position: {
-        x: targetX,
-        y: PADDLE_SIZE.height/2,
-        z: isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1,
-        velocity: player1Velocity.current
-      }
-    });
-
     // Host handles ball physics
     if (isHost && ballRef.current) {
-      const steps = COLLISION_CHECK_STEPS;
+      // Store ball state for lag compensation
+      previousBallStates.current.push({
+        position: ballRef.current.position.clone(),
+        time: performance.now()
+      });
+
+      // Keep only last second of states
+      while (previousBallStates.current.length > 0 && 
+             performance.now() - previousBallStates.current[0].time > 1000) {
+        previousBallStates.current.shift();
+      }
+
+      // Calculate dynamic collision steps based on ball speed
+      const speedRatio = ballSpeedRef.current / BALL_SPEED;
+      const dynamicSteps = Math.ceil(BASE_COLLISION_STEPS * speedRatio);
+      const steps = Math.min(dynamicSteps, BASE_COLLISION_STEPS * 2); // Cap maximum steps
+
       const stepDelta = delta / steps;
       let collisionOccurred = false;
 
-      for (let i = 0; i < steps; i++) {
-        if (collisionOccurred) break;
+      // Skip physics update if in post-collision freeze
+      if (postCollisionFreezeCounter.current > 0) {
+        postCollisionFreezeCounter.current--;
+        return;
+      }
 
+      for (let i = 0; i < steps && !collisionOccurred; i++) {
         lastBallPosition.current.copy(ballRef.current.position);
         
+        // Calculate ball movement with speed limit
         const moveAmount = new Vector3(
           ballDirection.x * ballSpeedRef.current * stepDelta * 60,
           0,
           ballDirection.z * ballSpeedRef.current * stepDelta * 60
         );
 
-        // Limit maximum movement per step
-        const maxMove = 0.05; // Reduced for more precise collision detection
-        if (moveAmount.length() > maxMove) {
-          moveAmount.normalize().multiplyScalar(maxMove);
+        // Limit maximum movement per step to prevent tunneling
+        if (moveAmount.length() > MAX_MOVE_PER_FRAME) {
+          moveAmount.normalize().multiplyScalar(MAX_MOVE_PER_FRAME);
         }
 
         const nextPosition = new Vector3().copy(ballRef.current.position).add(moveAmount);
@@ -497,7 +590,7 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
           continue;
         }
 
-        // Paddle positions with velocity
+        // Paddle positions with predicted velocities
         const player1Pos = {
           x: player1Ref.current.position.x,
           y: PADDLE_SIZE.height/2,
@@ -509,10 +602,10 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
           x: interpolatedOpponentPos.current.x,
           y: PADDLE_SIZE.height/2,
           z: isHost ? COURT_LENGTH/2 - 1 : -COURT_LENGTH/2 + 1,
-          velocity: 0
+          velocity: player2Ref.current ? (interpolatedOpponentPos.current.x - player2Ref.current.position.x) / stepDelta : 0
         };
 
-        // Check paddle collisions
+        // Check paddle collisions with improved positions
         const player1Collision = checkPaddleCollision(
           player1Pos,
           true,
@@ -534,7 +627,7 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
           setBallDirection(newDirection);
           collisionOccurred = true;
           
-          // Immediate sync after collision
+          // Immediate sync after collision with interpolation reset
           socket.emit('ballUpdate', {
             roomId,
             ballState: {
@@ -546,16 +639,25 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
             }
           });
           
+          // Reset interpolation to prevent jitter
+          if (player2Ref.current) {
+            interpolatedOpponentPos.current.x = player2Ref.current.position.x;
+          }
+          
           continue;
         }
 
-        // Update ball position if no collision occurred
-        ballRef.current.position.copy(nextPosition);
+        if (!collisionOccurred) {
+          ballRef.current.position.copy(nextPosition);
+        }
       }
 
-      // Regular sync
-      const now = performance.now();
-      if (now - lastSyncTime.current >= SYNC_RATE) {
+      // Regular sync with increased rate during fast movement
+      const syncNeeded = now - lastSyncTime.current >= (
+        Math.abs(player1Velocity.current) > PADDLE_SPEED/2 ? SYNC_RATE/2 : SYNC_RATE
+      );
+      
+      if (syncNeeded) {
         socket.emit('ballUpdate', {
           roomId,
           ballState: {
@@ -576,6 +678,17 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
         handleScoring('player1');
       }
     }
+
+    // Emit paddle movement with velocity
+    socket.emit('paddleMove', {
+      roomId,
+      position: {
+        x: targetX,
+        y: PADDLE_SIZE.height/2,
+        z: isHost ? -COURT_LENGTH/2 + 1 : COURT_LENGTH/2 - 1,
+        velocity: player1Velocity.current
+      }
+    });
   });
 
   // Add cleanup for timers in useEffect
@@ -749,6 +862,47 @@ const MultiplayerGameScene = ({ socket, roomId, isHost, onFpsUpdate }: Multiplay
           </mesh>
         </>
       )}
+
+      {/* Debug information display */}
+      <group position={[0, 4, 0]}>
+        {/* Ball speed */}
+        <Text
+          position={[-4, 0, 0]}
+          fontSize={0.3}
+          color="#00ff00"
+          anchorX="left"
+          anchorY="middle"
+          rotation={[0, isHost ? 0 : Math.PI, 0]}
+        >
+          {`Ball Speed: ${ballSpeedRef.current.toFixed(3)}`}
+        </Text>
+
+        {/* Last collision info */}
+        {lastCollisionInfo && performance.now() - lastCollisionInfo.time < 1000 && (
+          <Text
+            position={[-4, -0.4, 0]}
+            fontSize={0.3}
+            color="#ffff00"
+            anchorX="left"
+            anchorY="middle"
+            rotation={[0, isHost ? 0 : Math.PI, 0]}
+          >
+            {`Last Hit: ${lastCollisionInfo.type} at ${lastCollisionInfo.position.x.toFixed(2)}`}
+          </Text>
+        )}
+
+        {/* Missed collisions counter */}
+        <Text
+          position={[-4, -0.8, 0]}
+          fontSize={0.3}
+          color={debugMissedCollisions.current > 0 ? "#ff0000" : "#00ff00"}
+          anchorX="left"
+          anchorY="middle"
+          rotation={[0, isHost ? 0 : Math.PI, 0]}
+        >
+          {`Missed Hits: ${debugMissedCollisions.current}`}
+        </Text>
+      </group>
     </group>
   );
 };

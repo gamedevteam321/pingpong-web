@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { Mesh, Vector3, Clock, MathUtils } from 'three';
-import { Text } from '@react-three/drei';
+import { Text, Html } from '@react-three/drei';
 import { useThree } from '@react-three/fiber';
 
 const PADDLE_SPEED = 0.3;
@@ -54,6 +54,11 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
   const paddleVelocity = useRef(0);
   const aiVelocity = useRef(0);
   const ballSpeedRef = useRef(BALL_SPEED);
+  const [touchStartX, setTouchStartX] = useState<number | null>(null);
+  const [touchCurrentX, setTouchCurrentX] = useState<number | null>(null);
+  const touchSensitivity = 2.5;
+  const lastPaddleX = useRef(0);
+  const [isMobile, setIsMobile] = useState(false);
 
   const gameInfo = useMemo(() => {
     const maxScore = Math.max(score.player1, score.player2);
@@ -310,6 +315,48 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
     setBallDirection(initialDirection);
   }, []);
 
+  useEffect(() => {
+    const handleTouchStart = (e: TouchEvent) => {
+      const touch = e.touches[0];
+      setTouchStartX(touch.clientX);
+      setTouchCurrentX(touch.clientX);
+      if (player1Ref.current) {
+        lastPaddleX.current = player1Ref.current.position.x;
+      }
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      e.preventDefault();
+      const touch = e.touches[0];
+      setTouchCurrentX(touch.clientX);
+    };
+
+    const handleTouchEnd = () => {
+      setTouchStartX(null);
+      setTouchCurrentX(null);
+    };
+
+    window.addEventListener('touchstart', handleTouchStart, { passive: false });
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, []);
+
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile('ontouchstart' in window);
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+
   useFrame(() => {
     if (!ballRef.current || !player1Ref.current || !player2Ref.current) return;
     if (gameStatus === 'finished') return;
@@ -350,14 +397,23 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
     }
 
     let targetX = player1Ref.current.position.x;
-    if (keysPressed.current['ArrowLeft']) targetX += PADDLE_SPEED;
-    if (keysPressed.current['ArrowRight']) targetX -= PADDLE_SPEED;
+    
+    // Handle keyboard input
+    if (keysPressed.current['ArrowLeft']) targetX -= PADDLE_SPEED;
+    if (keysPressed.current['ArrowRight']) targetX += PADDLE_SPEED;
+
+    // Handle touch input
+    if (touchStartX !== null && touchCurrentX !== null) {
+      const touchDelta = (touchCurrentX - touchStartX);
+      const moveAmount = -(touchDelta / window.innerWidth) * COURT_WIDTH * touchSensitivity;
+      targetX = lastPaddleX.current + moveAmount;
+    }
 
     const playerMovement = calculateSmoothMovement(
       delta,
       player1Ref.current.position.x,
       targetX,
-      PADDLE_SPEED,
+      PADDLE_SPEED * 1.5, // Increased speed for touch
       paddleVelocity.current
     );
     
@@ -397,6 +453,12 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
     player2Ref.current.position.x = 0;
     aiTargetRef.current = 0;
   };
+
+  const handleRestartClick = useCallback(() => {
+    if (gameStatus === 'finished') {
+      resetGame();
+    }
+  }, [gameStatus, resetGame]);
 
   return (
     <group position={[0, 0, 0]}>
@@ -480,16 +542,38 @@ const GameScene = ({ onFpsUpdate }: GameSceneProps) => {
             {gameInfo.message}
           </Text>
           {gameStatus === 'finished' && (
-            <Text
-              position={[0, 9, 0]}
-              fontSize={0.7}
-              color="#ffffff"
-              anchorX="center"
-              anchorY="middle"
-              rotation={[0, Math.PI, 0]}
-            >
-              Press SPACE to play again
-            </Text>
+            <>
+              {!isMobile ? (
+                <Text
+                  position={[0, 9, 0]}
+                  fontSize={0.7}
+                  color="#ffffff"
+                  anchorX="center"
+                  anchorY="middle"
+                  rotation={[0, Math.PI, 0]}
+                >
+                  Press SPACE to play again
+                </Text>
+              ) : (
+                <Html position={[0, 9, 0]} center>
+                  <button
+                    onClick={handleRestartClick}
+                    style={{
+                      padding: '10px 20px',
+                      fontSize: '16px',
+                      backgroundColor: '#4169E1',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '5px',
+                      cursor: 'pointer',
+                      fontFamily: 'Arial, sans-serif'
+                    }}
+                  >
+                    Restart Game
+                  </button>
+                </Html>
+              )}
+            </>
           )}
         </group>
       )}
